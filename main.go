@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -52,7 +53,7 @@ func main() {
 // queryTicket query tickets with more accuration based on query12306
 func queryTicket(date string, fromc cSta, toc cSta) ([]Ticket, error) {
 	start := time.Now()
-	api := "http://kyfw.12306.cn/otn/leftTicket/queryX?leftTicketDTO.train_date=%s&leftTicketDTO.from_station=%s&leftTicketDTO.to_station=%s&purpose_codes=ADULT"
+	api := "https://kyfw.12306.cn/otn/leftTicket/queryX?leftTicketDTO.train_date=%s&leftTicketDTO.from_station=%s&leftTicketDTO.to_station=%s&purpose_codes=ADULT"
 	url := fmt.Sprintf(api, date, fromc, toc)
 	glog.V(1).Infof("query url %s", url)
 	const maxWait = 50 * time.Second
@@ -79,9 +80,13 @@ func queryTicket(date string, fromc cSta, toc cSta) ([]Ticket, error) {
 
 // query tickets from kyfw.12306.cn, using train date formats like 'YYYY-MM-DD' and from & to station name.
 func query12306(url string) ([]Ticket, error) {
-	resp, err := http.Get(url)
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	client := &http.Client{Transport: tr}
+	resp, err := client.Get(url)
 	if err != nil {
-		return nil, fmt.Errorf("http get: %v", err)
+		return nil, fmt.Errorf("https get: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {

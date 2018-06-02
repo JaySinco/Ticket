@@ -53,7 +53,7 @@ func main() {
 }
 
 func pickStation(stas staSet, pattern string) (sta station) {
-	switch opts := stas.findByNameOrAbbrev(pattern); len(opts) {
+	switch opts := stas.findAllByFields(pattern); len(opts) {
 	case 0:
 	case 1:
 		sta = opts[0]
@@ -216,11 +216,13 @@ func (m staSet) findByCode(code string) (sta station) {
 	return
 }
 
-func (m staSet) findByNameOrAbbrev(pattern string) (stas staSet) {
+func (m staSet) findAllByFields(pattern string) (stas staSet) {
 	for _, s := range m {
 		nok, _ := regexp.MatchString(pattern, s.name)
+		cok, _ := regexp.MatchString(pattern, s.code)
+		pok, _ := regexp.MatchString(pattern, s.pinyin)
 		aok, _ := regexp.MatchString(pattern, s.abbrev)
-		if nok || aok {
+		if nok || cok || pok || aok {
 			stas = append(stas, s)
 		}
 	}

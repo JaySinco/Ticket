@@ -1,107 +1,87 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/golang/glog"
 )
 
 func main() {
-	// init process
-	genStationMap()
-	dates := flag.String("date", time.Now().Format("2006-01-02"), "ticket date, format: 'YYYY-MM-DD'")
-	fromc := cStaFlag("from", "AOH", fmt.Sprintf("department station code, available: %s", staMsg))
-	toc := cStaFlag("to", "CZH", fmt.Sprintf("arrival station code,  available: %s", staMsg))
-	befs := flag.String("bef", "00:00", "earliest required depart time, format: 'HH:MM'")
-	afts := flag.String("aft", "23:59", "latest required depart time, format: 'HH:MM'")
-	rest := flag.Duration("rest", 1*time.Minute, "break time between two successful queries, format follows time.Duration")
-	flag.Parse()
-	defer glog.Flush()
-	// check input parameter
-	// -- date
-	okd, _ := regexp.Match(`^\d\d\d\d-\d\d-\d\d$`, []byte(*dates))
-	if !okd {
-		glog.V(0).Infof("wrong input date format, should be 'YYYY-MM-DD'")
+	if len(os.Args[1:]) != 3 || len(os.Args[3]) != 6 {
+		fmt.Println("Usage: ticket [from] [to] [YYMMDD]")
 		return
 	}
-	// -- required depart time
-	okb, _ := regexp.Match(`^\d\d:\d\d$`, []byte(*befs))
-	oka, _ := regexp.Match(`^\d\d:\d\d$`, []byte(*afts))
-	if !okb || !oka {
-		glog.V(0).Infof("wrong input depart time format, should be 'HH:MM'")
+	datetm, err := time.Parse("060102", os.Args[3])
+	if err != nil {
+		fmt.Printf("[ERROR] failed to parse date '%s', should be in form 'YYMMDD'\n", os.Args[3])
 		return
 	}
-	beft := atot("2006-01-02 15:04", fmt.Sprintf("%s %s", *dates, *befs))
-	aftt := atot("2006-01-02 15:04", fmt.Sprintf("%s %s", *dates, *afts))
-	// --log
-	glog.V(0).Infof("*** Want ticket at %s~%s@%s->%s ***",
-		beft.Format("2006-01-02 within 15:04"), aftt.Format("15:04"), c2nStaMap[*fromc], c2nStaMap[*toc])
+	date := datetm.Format("2006-01-02")
 
-	// user customed ticket filter function
-	isPicked := func(tk *Ticket) bool {
-		if (tk.SecondCls != 0 || tk.StandCls != 0) &&
-			(beft.Before(tk.Depart) && aftt.After(tk.Depart)) {
-			return true
-		}
-		return false
+	stas, err := getStationSet()
+	if err != nil {
+		fmt.Printf("[ERROR] get station set: %v\n", err)
+		return
 	}
+	from := pickStation(stas, os.Args[1])
+	to := pickStation(stas, os.Args[2])
+	if from.name == "" || to.name == "" {
+		fmt.Println("[ERROR] failed to resolve station pattern")
+		return
+	}
+	tks, err := query12306(date, from, to, stas)
+	if err != nil {
+		fmt.Printf("[ERROR] query 12306: %v\n", err)
+		return
+	}
+	fmt.Printf("[QUERY] %s从%s开往%s尚有余票的列车如下：\n", datetm.Format("2006年01月02日"), from.name, to.name)
+	fmt.Println("        车次     出发   到达   二等座   无座")
+	fmt.Println("        -------------------------------------")
+	for _, tk := range tks {
+		fmt.Printf("        %-5s   %s   %s   %s\t%s\n", tk.train, tk.depart.Format("15:04"), tk.arrive.Format("15:04"),
+			itktoa(tk.secondCls), itktoa(tk.standCls))
+	}
+}
 
-	// query ticket
-	for {
-		tks, err := queryTicket(*dates, *fromc, *toc)
-		if err != nil {
-			glog.V(0).Infof("query ticket: %v", err)
-			return
-		}
-		for _, tk := range tks {
-			if isPicked(tk) {
-				glog.V(0).Infof("T** %s", tk)
+func pickStation(stas staSet, pattern string) (sta station) {
+	switch opts := stas.findByNameOrAbbrev(pattern); len(opts) {
+	case 0:
+	case 1:
+		sta = opts[0]
+	default:
+		fmt.Printf("[CHOSE] '%s'有多个匹配的车站如下：\n", pattern)
+		for i, s := range opts {
+			if i%2 == 0 {
+				fmt.Printf("      % 4d - %s", i, s.name)
+				if i == len(opts)-1 {
+					fmt.Printf("\n")
+				}
+			} else {
+				fmt.Printf("\t\t\t% 4d - %s\n", i, s.name)
 			}
 		}
-		time.Sleep(*rest)
-	}
-}
-
-// queryTicket query tickets with more accuration based on query12306
-func queryTicket(date string, fromc cSta, toc cSta) ([]*Ticket, error) {
-	start := time.Now()
-	api := "https://kyfw.12306.cn/otn/leftTicket/queryX?leftTicketDTO.train_date=%s&leftTicketDTO.from_station=%s&leftTicketDTO.to_station=%s&purpose_codes=ADULT"
-	url := fmt.Sprintf(api, date, fromc, toc)
-	glog.V(1).Infof("query url %s", url)
-	const maxWait = 1*time.Minute + 30*time.Second
-	wait := 10 * time.Millisecond
-	var rtks, tks []*Ticket
-	var err error
-	for rtks, err = query12306(url); time.Since(start) < maxWait &&
-		err != nil; rtks, err = query12306(url) {
-		glog.V(1).Infof("wait %s then try again, last error: %v", wait, err)
-		time.Sleep(wait)
-		wait *= 2
-	}
-	if err != nil {
-		return nil, fmt.Errorf("exceed max wait limit %q, unable to query tickets after %q", maxWait, time.Since(start))
-	}
-	glog.V(1).Info("*** A successful query ***")
-	for _, tk := range rtks {
-		if tk.From == fromc && tk.To == toc {
-			tks = append(tks, tk)
+		fmt.Printf("[ENTER] 上列车站中对应'%s'的序号：", pattern)
+		reader := bufio.NewReader(os.Stdin)
+		index, _, _ := reader.ReadLine()
+		if picked, err := strconv.ParseUint(string(index), 10, 64); err == nil && int(picked) < len(opts) {
+			sta = opts[picked]
 		}
 	}
-	return tks, nil
+	return
 }
 
-// query tickets from kyfw.12306.cn, using train date formats like 'YYYY-MM-DD' and from & to station name.
-func query12306(url string) ([]*Ticket, error) {
+func query12306(date string, from, to station, stas staSet) ([]*ticket, error) {
+	api := "https://kyfw.12306.cn/otn/leftTicket/query?leftTicketDTO.train_date=%s&leftTicketDTO.from_station=%s&leftTicketDTO.to_station=%s&purpose_codes=ADULT"
+	url := fmt.Sprintf(api, date, from.code, to.code)
 	tr := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	}
@@ -114,7 +94,6 @@ func query12306(url string) ([]*Ticket, error) {
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("response status code: %s", resp.Status)
 	}
-	glog.V(2).Infof("header: %s", resp.Header)
 	if resp.Header.Get("Content-Type") != "application/json;charset=UTF-8" {
 		return nil, fmt.Errorf("content type not 'application/json;charset=UTF-8'")
 	}
@@ -122,7 +101,6 @@ func query12306(url string) ([]*Ticket, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read body: %v", err)
 	}
-	glog.V(2).Infof("body: %s", string(body))
 	raw := new(struct {
 		Data     struct{ Result []string }
 		Messages []string
@@ -134,40 +112,52 @@ func query12306(url string) ([]*Ticket, error) {
 	if len(raw.Messages) > 0 {
 		return nil, fmt.Errorf("message: %s", strings.Join(raw.Messages, ";"))
 	}
-	tks := make([]*Ticket, 0)
+	tks := make([]*ticket, 0)
 	for _, line := range raw.Data.Result {
-		tks = append(tks, mkticket(line))
+		tk := mkticket(line, stas)
+		if tk.from == from && tk.to == to && (tk.secondCls != 0 || tk.standCls != 0) {
+			tks = append(tks, tk)
+		}
 	}
 	return tks, nil
 }
 
-// make ticket out of raw string line
-func mkticket(line string) *Ticket {
-	var tk Ticket
-	glog.V(2).Infof("make ticket out of: %s", line)
+func mkticket(line string, stas staSet) *ticket {
+	var tk ticket
 	tab := strings.Split(line, "|")
-	tk.Train = tab[3]
-	tk.Stat = tab[1]
-	tk.From = cSta(tab[6])
-	tk.To = cSta(tab[7])
-	tk.Depart = atot("20060102 15:04", fmt.Sprintf("%s %s", tab[13], tab[8]))
-	tk.Arrive = atot("20060102 15:04", fmt.Sprintf("%s %s", tab[13], tab[9]))
-	tk.SecondCls = atoitk(tab[30])
-	tk.StandCls = atoitk(tab[26])
-	glog.V(2).Infof("F** %s", tk)
+	tk.train = tab[3]
+	tk.stat = tab[1]
+	tk.from = stas.findByCode(tab[6])
+	tk.to = stas.findByCode(tab[7])
+	tk.depart = atot("20060102 15:04", fmt.Sprintf("%s %s", tab[13], tab[8]))
+	tk.arrive = atot("20060102 15:04", fmt.Sprintf("%s %s", tab[13], tab[9]))
+	tk.secondCls = atoitk(tab[30])
+	tk.standCls = atoitk(tab[26])
 	return &tk
 }
 
-// atot convert ascii to time.Time
+type ticket struct {
+	train     string
+	stat      string
+	from      station
+	to        station
+	depart    time.Time
+	arrive    time.Time
+	secondCls int
+	standCls  int
+}
+
+func (t ticket) String() string {
+	return fmt.Sprintf("[%s][%-5s] [时刻]%s~%s [车站]%s->%s [座位]二等:%s/站票:%s",
+		t.stat, t.train, t.depart.Format("15:04"), t.arrive.Format("15:04"),
+		t.from.name, t.to.name, itktoa(t.secondCls), itktoa(t.standCls))
+}
+
 func atot(f, s string) time.Time {
-	tm, err := time.Parse(f, strings.Replace(s, "24:00", "23:59", 1))
-	if err != nil {
-		glog.V(1).Infof("atot: %v", err)
-	}
+	tm, _ := time.Parse(f, strings.Replace(s, "24:00", "23:59", 1))
 	return tm
 }
 
-// atoitk convert ascii to ticket number
 func atoitk(s string) int {
 	if s == "有" {
 		return -1
@@ -175,14 +165,10 @@ func atoitk(s string) int {
 	if s == "" || s == "无" || s == "*" {
 		return 0
 	}
-	i, err := strconv.Atoi(s)
-	if err != nil {
-		glog.V(1).Infof("atoitk: %v", err)
-	}
+	i, _ := strconv.Atoi(s)
 	return i
 }
 
-// atoitk convert ascii to ticket number
 func itktoa(i int) string {
 	if i == -1 {
 		return "有"
@@ -193,65 +179,61 @@ func itktoa(i int) string {
 	return strconv.Itoa(i)
 }
 
-// data type for station
-type nSta string // Chinese station name
-type cSta string // English station code
-var n2cStaMap map[nSta]cSta
-var c2nStaMap map[cSta]nSta
-var staMsg string
-
-func (c *cSta) Set(s string) error {
-	if _, ok := c2nStaMap[cSta(s)]; !ok {
-		return fmt.Errorf("unsupport input station %s", s)
+func getStationSet() (stas staSet, err error) {
+	api := "https://kyfw.12306.cn/otn/resources/js/framework/station_name.js?station_version=1.9055"
+	client := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}}
+	resp, err := client.Get(api)
+	if err != nil {
+		return nil, fmt.Errorf("https get: %v", err)
 	}
-	*c = cSta(s)
-	return nil
-}
-
-func (c *cSta) String() string {
-	return string(*c)
-}
-
-func cStaFlag(name string, value cSta, usage string) *cSta {
-	var c cSta
-	flag.CommandLine.Var(&c, name, usage)
-	return &c
-}
-
-//genStationMap make convertion map between station name and code
-func genStationMap() {
-	n2cStaMap = map[nSta]cSta{
-		"上海虹桥": "AOH",
-		"上海":   "SHH",
-		"上海南":  "SNH",
-		"常州":   "CZH",
-		"常州北":  "ESH",
-		"戚墅堰":  "QYH",
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("response status code: %s", resp.Status)
 	}
-	c2nStaMap = make(map[cSta]nSta)
-	var staBuf bytes.Buffer
-	for n, c := range n2cStaMap {
-		c2nStaMap[c] = n
-		staBuf.WriteString(fmt.Sprintf("%s-%s;", c, n))
+	body, err := ioutil.ReadAll(resp.Body)
+	if ok := bytes.HasPrefix(body, []byte("var station_names ='")); !ok {
+		return nil, fmt.Errorf("wrong prefix within response body")
 	}
-	staMsg = staBuf.String()
+	raw := string(body[21 : len(body)-2])
+	rawlst := strings.Split(raw, "@")
+	for _, r := range rawlst {
+		e := strings.Split(r, "|")
+		stas = append(stas, station{e[1], e[2], e[3], e[4]})
+	}
+	return stas, nil
 }
 
-// data type for ticket information
-type Ticket struct {
-	Train     string
-	Stat      string
-	From      cSta
-	To        cSta
-	Depart    time.Time
-	Arrive    time.Time
-	SecondCls int
-	StandCls  int
+type staSet []station
+
+func (m staSet) findByCode(code string) (sta station) {
+	for _, s := range m {
+		if s.code == code {
+			sta = s
+		}
+	}
+	return
 }
 
-// ticket display
-func (t Ticket) String() string {
-	return fmt.Sprintf("[%s][%-5s] [时刻]%s~%s [车站]%s->%s [座位]二等:%s/站票:%s",
-		t.Stat, t.Train, t.Depart.Format("15:04"), t.Arrive.Format("15:04"),
-		c2nStaMap[t.From], c2nStaMap[t.To], itktoa(t.SecondCls), itktoa(t.StandCls))
+func (m staSet) findByNameOrAbbrev(pattern string) (stas staSet) {
+	for _, s := range m {
+		nok, _ := regexp.MatchString(pattern, s.name)
+		aok, _ := regexp.MatchString(pattern, s.abbrev)
+		if nok || aok {
+			stas = append(stas, s)
+		}
+	}
+	return stas
+}
+
+type station struct {
+	name   string
+	code   string
+	pinyin string
+	abbrev string
+}
+
+func (s station) String() string {
+	return fmt.Sprintf("[%s]%s(%s|%s)", s.code, s.name, s.pinyin, s.abbrev)
 }

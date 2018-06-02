@@ -33,9 +33,13 @@ func main() {
 		return
 	}
 	from := pickStation(stas, os.Args[1])
+	if from.name == "" {
+		fmt.Println("[ERROR] failed to resolve 'from' station pattern")
+		return
+	}
 	to := pickStation(stas, os.Args[2])
-	if from.name == "" || to.name == "" {
-		fmt.Println("[ERROR] failed to resolve station pattern")
+	if to.name == "" {
+		fmt.Println("[ERROR] failed to resolve 'to' station pattern")
 		return
 	}
 	tks, err := query12306(date, from, to, stas)

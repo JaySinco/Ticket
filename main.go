@@ -47,7 +47,7 @@ func main() {
 		fmt.Printf("[ERROR] query 12306: %v\n", err)
 		return
 	}
-	fmt.Printf("[QUERY] %s从%s开往%s尚有余票的列车如下：\n", datetm.Format("2006年01月02日"), from.name, to.name)
+	fmt.Printf("[QUERY] %s从'%s'开往'%s'尚有余票的列车如下：\n", datetm.Format("2006年01月02日"), from.name, to.name)
 	fmt.Println("        车次     出发   到达   二等座   无座")
 	fmt.Println("        -------------------------------------")
 	for _, tk := range tks {
